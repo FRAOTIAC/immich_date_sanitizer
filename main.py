@@ -12,6 +12,8 @@ def parse_args():
                         help="Host IP and port (e.g., 192.168.2.3:8080)")
     parser.add_argument("--api_key", type=str,
                         help="API key for authentication")
+    parser.add_argument("--reset_to_exif_original", action='store_true',
+                        help="Reset all dates to exifInfo.dateTimeOriginal")
     args = parser.parse_args()
     return args
 
@@ -28,5 +30,5 @@ if __name__ == "__main__":
     API_URL = construct_api_url(args.host)
     API_KEY = args.api_key
 
-    updater = DateSanitizer(API_URL, API_KEY)
+    updater = DateSanitizer(API_URL, API_KEY, reset_to_exif_original=args.reset_to_exif_original)
     updater.process_records()

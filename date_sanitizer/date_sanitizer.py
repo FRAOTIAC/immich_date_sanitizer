@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 
 class DateSanitizer:
-    def __init__(self, api_url, api_key):
+    def __init__(self, api_url, api_key,reset_to_exif_original=False):
         self.api_url = api_url
         self.headers = {
             'Accept': 'application/json',
@@ -15,6 +15,8 @@ class DateSanitizer:
             'x-api-key': api_key
         }
         self.today = datetime.datetime.now()
+        self.reset_to_exif_original = reset_to_exif_original
+
 
     def process_records(self):
         print("Fetching and processing data from API...")
@@ -44,16 +46,96 @@ class DateSanitizer:
     def update_record(self, record, progress):
         id = record['id']
         original_record = copy.deepcopy(record)
-        reasonable_date = self.find_most_reasonable_date(record)
-        if reasonable_date:
-            update_payload = self.build_update_payload(record, reasonable_date)
-            response = requests.put(f"{self.api_url}/{id}", headers=self.headers, data=json.dumps(update_payload))
-            if response.status_code == 200:
-                self.print_changes(original_record, record, progress, id)
-                return True
+
+        if self.reset_to_exif_original:
+            dateTimeOriginal = self.parse_date(record.get('exifInfo', {}).get('dateTimeOriginal'))
+            if dateTimeOriginal:
+                reasonable_date = dateTimeOriginal
             else:
-                progress.write(f"Failed to update record with id: {id}")
+                progress.write(f"Record with id: {id} does not have a valid dateTimeOriginal")
                 return False
+        else:
+            if self.has_incorrect_date(record):
+                reasonable_date = self.find_most_reasonable_date(record)
+                if not reasonable_date:
+                    progress.write(f"Record with id: {id} does not have a valid reasonable date")
+                    return False
+            else:
+                progress.write(f"Record with id: {id} has no incorrect dates")
+                return True
+
+        update_payload = self.build_update_payload(record, reasonable_date)
+        response = requests.put(f"{self.api_url}/{id}", headers=self.headers, data=json.dumps(update_payload))
+        if response.status_code == 200:
+            self.print_changes(original_record, record, progress, id)
+            return True
+        else:
+            progress.write(f"Failed to update record with id: {id}")
+            return False
+
+    def has_incorrect_date(self, record):
+        date_keys = ['fileCreatedAt', 'localDateTime', 'fileModifiedAt']
+
+        # Check dates in exifInfo
+        exif_info = record.get('exifInfo', {})
+        exif_dates = [
+            self.parse_date(exif_info.get('dateTimeOriginal')),
+            self.parse_date(exif_info.get('modifyDate'))
+        ]
+
+        # Check other date keys
+        other_dates = [self.parse_date(record.get(key)) for key in date_keys]
+
+        # Combine all dates
+        all_dates = exif_dates + other_dates
+
+        for date in all_dates:
+            if self.is_incorrect_date(date):
+                return True
+        return False
+
+    def is_incorrect_date(self, date):
+        return date and (date > self.today or date.year < 1970)
+
+    def find_most_reasonable_date(self, record):
+        exif_info = record.get('exifInfo', {})
+        exif_dates = [
+            self.parse_date(exif_info.get('dateTimeOriginal')),
+            self.parse_date(exif_info.get('modifyDate'))
+        ]
+
+        other_date_keys = ['fileCreatedAt', 'localDateTime', 'fileModifiedAt']
+        other_dates = [self.parse_date(record.get(key)) for key in other_date_keys]
+
+        valid_dates = [date for date in (exif_dates + other_dates) if date and date <= self.today]
+
+        if valid_dates:
+            min_valid_date = min(valid_dates)
+            if min_valid_date.year > 1970:
+                return min_valid_date
+            else:
+                return None
+        else:
+            return None
+
+    def build_update_payload(self, record, reasonable_date):
+        iso_date = reasonable_date.isoformat() + 'Z'
+
+        date_fields = ['fileCreatedAt', 'localDateTime', 'modifyDate']
+        for field in date_fields:
+            current_date = self.parse_date(record.get(field))
+            if self.is_incorrect_date(current_date):
+                record[field] = iso_date
+
+        if 'exifInfo' in record:
+            exif = record['exifInfo']
+            exif_date_fields = ['dateTimeOriginal', 'modifyDate']
+            for field in exif_date_fields:
+                exif_date = self.parse_date(exif.get(field))
+                if self.is_incorrect_date(exif_date):
+                    exif[field] = iso_date
+
+        return record
 
     def print_changes(self, original, updated, progress, record_id):
         changes = []
@@ -69,46 +151,6 @@ class DateSanitizer:
             for change in changes:
                 progress.write(change)
         return changes
-
-    def build_update_payload(self, record, reasonable_date):
-        iso_date = reasonable_date.isoformat() + 'Z'
-
-        date_fields = ['fileCreatedAt', 'localDateTime', 'modifyDate']
-        for field in date_fields:
-            current_date = self.parse_date(record.get(field))
-            if not current_date or current_date > self.today or current_date.year < 1970:
-                record[field] = iso_date
-
-        if 'exifInfo' in record:
-            exif = record['exifInfo']
-            exif_date_fields = ['dateTimeOriginal', 'modifyDate']
-            for field in exif_date_fields:
-                exif_date = self.parse_date(exif.get(field))
-                if not exif_date or exif_date > self.today or exif_date.year < 1970:
-                    exif[field] = iso_date
-
-        return record
-
-    def find_most_reasonable_date(self, record):
-        exif_date = self.parse_date(record.get('exifInfo', {}).get('dateTimeOriginal'))
-
-        other_date_keys = ['fileCreatedAt', 'localDateTime', 'modifyDate', 'fileModifiedAt']
-        other_dates = [self.parse_date(record.get(key)) for key in other_date_keys]
-
-        valid_dates = [date for date in other_dates if date and date <= self.today]
-
-        if exif_date and exif_date <= self.today:
-            base_date = exif_date
-        elif valid_dates:
-            min_valid_date = min(valid_dates)
-            if min_valid_date.year > 1970:
-                base_date = min_valid_date
-            else:
-                return None
-        else:
-            return None
-
-        return base_date
 
     def parse_date(self, date_str):
         if date_str is None:
